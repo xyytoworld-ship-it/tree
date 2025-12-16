@@ -7,33 +7,48 @@
     <style>
         :root { --gold: #d4af37; --cream: #fceea7; --black: #000000; }
         body { margin: 0; overflow: hidden; background-color: var(--black); font-family: serif; color: var(--cream); user-select: none; touch-action: none; }
+        
+        /* 加载层 */
         #loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--black); z-index: 999; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: opacity 0.8s ease; }
         .spinner { width: 40px; height: 40px; border: 2px solid rgba(212, 175, 55, 0.1); border-top: 2px solid var(--gold); border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 20px; }
-        .loading-text { color: var(--gold); font-size: 14px; letter-spacing: 2px; text-align: center; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .loading-text { color: var(--gold); font-size: 14px; letter-spacing: 2px; text-align: center; line-height: 1.6; }
+        
+        /* UI 层 */
         #ui-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; transition: opacity 0.5s ease; }
         .ui-hidden { opacity: 0 !important; pointer-events: none !important; }
         h1 { font-size: min(48px, 8vw); text-align: center; margin-top: 20px; background: linear-gradient(to bottom, #ffffff, var(--gold)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; width: 100%; }
-        .btn { background: rgba(20,20,20,0.6); border: 1px solid var(--gold); color: var(--gold); padding: 12px 24px; pointer-events: auto; }
-        .hint { font-size: 12px; color: rgba(252, 238, 167, 0.6); margin-top: 10px; }
+        .btn { background: rgba(20,20,20,0.6); border: 1px solid var(--gold); color: var(--gold); padding: 12px 24px; pointer-events: auto; border-radius: 20px; font-size: 14px; margin-bottom: 8px; }
+        .hint { font-size: 12px; color: rgba(252, 238, 167, 0.8); background: rgba(0,0,0,0.3); padding: 4px 10px; border-radius: 10px; display: inline-block; }
+        
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
+    <!-- 使用国内镜像加速基础库 -->
     <script type="importmap">
         { "imports": { "three": "https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js", "three/addons/": "https://registry.npmmirror.com/three/0.160.0/files/examples/jsm/", "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm" } }
     </script>
 </head>
 <body>
-    <div id="loader"><div class="spinner"></div><div class="loading-text" id="msg">正在连接...<br>(3秒后自动跳过AI)</div></div>
+    <!-- 加载界面 -->
+    <div id="loader">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loader-msg">正在构建3D场景...</div>
+    </div>
+
+    <!-- 交互界面 -->
     <div id="ui-container">
         <h1>Merry Christmas</h1>
-        <div style="position:absolute; bottom:40px; width:100%; text-align:center;">
+        <div style="position:absolute; bottom:30px; width:100%; text-align:center; display:flex; flex-direction:column; align-items:center;">
             <div style="position:relative;display:inline-block">
-                <button class="btn">ADD PHOTO</button>
+                <button class="btn">上传照片 (ADD PHOTO)</button>
                 <input type="file" id="imageInput" accept="image/*" style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer;">
             </div>
-            <div class="hint" id="gesture-hint">初始化中...</div>
+            <!-- 状态显示区域 -->
+            <div class="hint" id="status-text">触摸屏幕即可旋转 (AI准备中...)</div>
         </div>
     </div>
+
     <div style="position:absolute;bottom:0;right:0;width:1px;height:1px;overflow:hidden"><video id="webcam" autoplay playsinline webkit-playsinline></video></div>
+
     <script type="module">
         import * as THREE from 'three';
         import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -45,15 +60,33 @@
         const STATE = { mode: 'TREE', targetPhoto: null, handRotation: { x: 0, y: 0 } };
         let handLandmarker = null;
 
-        // === 3D 核心逻辑 ===
         class App {
             constructor() { 
                 this.container = document.body; this.particles = []; this.photos = []; this.clock = new THREE.Clock(); 
                 this.init();
             }
+
             init() {
-                // 1. 场景
-                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                // 1. 初始化 3D 场景
+                this.setupThreeJS();
+                this.createContent();
+                this.setupInteraction();
+
+                // 2. 移除加载遮罩 (2秒后强制移除，绝不卡死)
+                setTimeout(() => {
+                    const l = document.getElementById('loader');
+                    if(l) { l.style.opacity = '0'; setTimeout(()=>l.remove(), 800); }
+                }, 2000);
+
+                // 3. 尝试加载 AI (异步进行，不阻塞界面)
+                this.loadAI();
+
+                // 4. 开始动画循环
+                this.animate();
+            }
+
+            setupThreeJS() {
+                this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
                 this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
                 this.renderer.toneMapping = THREE.ReinhardToneMapping;
@@ -63,29 +96,14 @@
                 this.scene = new THREE.Scene();
                 this.scene.environment = new THREE.PMREMGenerator(this.renderer).fromScene(new RoomEnvironment(), 0.04).texture;
                 this.mainGroup = new THREE.Group(); this.scene.add(this.mainGroup);
-
-                // 2. 光照与特效
+                
+                // 灯光特效
                 this.scene.add(new THREE.AmbientLight(0xffffff, 0.6));
                 const pl = new THREE.PointLight(0xffaa00, 2, 50); this.mainGroup.add(pl);
                 const sl = new THREE.SpotLight(0xd4af37, 1200); sl.position.set(30,40,40); this.scene.add(sl);
                 this.composer = new EffectComposer(this.renderer);
                 this.composer.addPass(new RenderPass(this.scene, this.camera));
                 this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.4, 0.7));
-
-                // 3. 内容
-                this.createContent();
-                this.setupInteraction();
-
-                // 4. 尝试加载 AI (带超时保护)
-                this.tryLoadAI();
-
-                // 5. 强制显示 (保底)
-                setTimeout(() => {
-                    const l = document.getElementById('loader');
-                    if(l) { l.style.opacity = '0'; setTimeout(()=>l.remove(), 800); }
-                }, 3500); // 3.5秒后强制进入，不管AI好没好
-                
-                this.animate();
             }
 
             createContent() {
@@ -101,8 +119,8 @@
                 const defTex = new THREE.CanvasTexture(c); defTex.colorSpace = THREE.SRGBColorSpace;
                 this.addPhoto(defTex);
 
-                // 粒子
-                for(let i=0; i<800; i++) {
+                // 圣诞树粒子
+                for(let i=0; i<900; i++) {
                     const m = new THREE.Mesh(box, Math.random()>0.5?matGold:matRed);
                     this.mainGroup.add(m);
                     this.particles.push({ mesh: m, 
@@ -138,29 +156,57 @@
                         r.readAsDataURL(e.target.files[0]);
                     }
                 });
-                window.addEventListener('touchstart', () => {
-                    const ui = document.getElementById('ui-container');
-                    ui.style.opacity = ui.style.opacity === '0' ? '1' : '0';
+                // 触摸隐藏UI
+                window.addEventListener('touchstart', (e) => {
+                    if(e.target.tagName !== 'BUTTON' && e.target.tagName !== 'INPUT') {
+                        const ui = document.getElementById('ui-container');
+                        ui.style.opacity = ui.style.opacity === '0' ? '1' : '0';
+                    }
                 });
             }
 
-            async tryLoadAI() {
+            // --- AI 加载核心 (带详细状态) ---
+            async loadAI() {
+                const updateStatus = (msg) => {
+                    const el = document.getElementById('status-text');
+                    if(el) el.innerText = msg;
+                }
+
                 try {
+                    // 1. 加载 WASM
+                    updateStatus("正在下载AI模型 (约10MB)...");
                     const vision = await FilesetResolver.forVisionTasks("./wasm");
+                    
+                    // 2. 初始化模型
+                    updateStatus("正在启动 AI 引擎...");
                     handLandmarker = await HandLandmarker.createFromOptions(vision, {
                         baseOptions: { modelAssetPath: "./wasm/hand_landmarker.task", delegate: "GPU" },
                         runningMode: "VIDEO", numHands: 1
                     });
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+
+                    // 3. 请求摄像头
+                    updateStatus("请允许使用摄像头...");
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: "user", width: { ideal: 320 }, height: { ideal: 240 } } 
+                    });
+                    
                     const video = document.getElementById('webcam');
                     video.srcObject = stream;
                     video.addEventListener("loadeddata", () => {
+                        updateStatus("✨ 魔法已激活: 捏手指/握拳/张手");
                         this.predictAI(video);
-                        document.getElementById('gesture-hint').innerText = "AI已激活: 捏合/握拳/张手";
                     });
+
                 } catch(e) {
-                    console.log("AI Load Fail", e);
-                    document.getElementById('gesture-hint').innerText = "AI未激活 (点击屏幕隐藏UI)";
+                    console.error(e);
+                    // 详细报错显示
+                    if(e.name === 'NotAllowedError') {
+                        updateStatus("❌ 摄像头权限被拒绝，仅触摸模式");
+                    } else if(e.message && e.message.includes('404')) {
+                        updateStatus("❌ AI模型文件丢失，仅触摸模式");
+                    } else {
+                        updateStatus("⚠️ 网络慢或加载失败，仅触摸模式");
+                    }
                 }
             }
 
@@ -172,14 +218,17 @@
                         const res = handLandmarker.detectForVideo(video, performance.now());
                         if(res.landmarks[0]) {
                             const lm = res.landmarks[0];
+                            // 映射手势位置到旋转
                             STATE.handRotation.y = (lm[9].x - 0.5) * -3;
                             STATE.handRotation.x = (lm[9].y - 0.5) * 2;
+                            
+                            // 简单手势识别
                             const d = (i,j) => Math.hypot(lm[i].x-lm[j].x, lm[i].y-lm[j].y);
-                            if(d(4,8) < 0.05) {
+                            if(d(4,8) < 0.05) { // 捏合
                                 STATE.mode = 'FOCUS'; 
                                 if(!STATE.targetPhoto && this.photos.length) STATE.targetPhoto = this.photos[Math.floor(Math.random()*this.photos.length)];
-                            } else if(d(12,0) < 0.25) STATE.mode = 'TREE';
-                            else if(d(12,0) > 0.4) STATE.mode = 'SCATTER';
+                            } else if(d(12,0) < 0.25) STATE.mode = 'TREE'; // 握拳
+                            else if(d(12,0) > 0.4) STATE.mode = 'SCATTER'; // 张开
                         }
                     }
                     requestAnimationFrame(loop);
@@ -191,10 +240,14 @@
                 requestAnimationFrame(() => this.animate());
                 const time = this.clock.getElapsedTime();
                 
+                // 旋转逻辑: 有手用手控，没手自动转
                 this.mainGroup.rotation.y += (STATE.handRotation.y - this.mainGroup.rotation.y) * 0.1;
                 this.mainGroup.rotation.x += (STATE.handRotation.x - this.mainGroup.rotation.x) * 0.1;
-                if(!handLandmarker) this.mainGroup.rotation.y += 0.005; // 自动旋转
+                if(!handLandmarker && Math.abs(STATE.handRotation.y) < 0.01) {
+                    this.mainGroup.rotation.y += 0.005; 
+                }
 
+                // 粒子逻辑
                 this.particles.forEach(p => {
                     let tPos = new THREE.Vector3();
                     let tScale = 1;
